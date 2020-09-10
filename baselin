@@ -1,0 +1,367 @@
+import numpy as np
+import pandas as pd
+import seaborn as sns
+import missingno as msno
+import matplotlib.pyplot as plt
+from scipy import stats
+import time
+#模型
+import xgboost as xgb
+from catboost import CatBoostRegressor
+import lightgbm as lgb
+#模型评估
+from sklearn.metrics import roc_auc_score,mean_absolute_error
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import cross_val_score,train_test_split
+import sklearn.preprocessing as preprocessing
+
+
+#导入数据
+data_train=pd.read_csv('.../used_car_train_20200313.csv',sep=' ')
+data_test=pd.read_csv('.../used_car_testB_20200421.csv',sep=' ')
+
+#合并数据
+data_train['type']='train'
+data_test['type']='test'
+data_all=pd.concat([data_train,data_test],axis=0,ignore_index=True,sort=False)
+
+#查看数据结构
+print(data_all.shape)
+
+#查看头部数据
+data_all.head(1).T
+
+#查看列名称
+data_all.columns
+
+#查看数据特征
+data_all.info()
+data_all.dtypes.value_counts()
+
+#查看缺失率
+data_all.isnull().sum()/len(data_all)*100
+
+#训练、测试数据集 核密度分布图 查找测试集和训练集两个数据异常分布，删除异常值
+for column in data_all[['price', 'model', 'brand', 'bodyType','fuelType',
+        'power', 'kilometer',  'v_0', 'v_1', 'v_2', 'v_3',
+       'v_4', 'v_5', 'v_6', 'v_7', 'v_8', 'v_9', 'v_10', 'v_11', 'v_12',
+       'v_13', 'v_14']]:
+    g = sns.kdeplot(data_all[column][(data_all["type"] == "train")], color="Red", shade = True)
+    g = sns.kdeplot(data_all[column][(data_all["type"] == "test")], ax =g, color="Blue", shade= True)
+    g.set_xlabel(column)
+    g.set_ylabel("Frequency")
+    g = g.legend(["train","test"])
+    plt.show()
+
+#查看相关性
+corr = data_all.select_dtypes(include = ['float64', 'int64']).iloc[:,1:].corr()
+print(corr['price'].abs().sort_values())
+print(corr['price'].sort_values())
+
+
+#数值型数据
+num_features=[ 'kilometer','power','price', 'v_0',
+       'v_1', 'v_2', 'v_3', 'v_4', 'v_5', 'v_6', 'v_7', 'v_8', 'v_9', 'v_10',
+       'v_11', 'v_12', 'v_13', 'v_14']
+
+#类目型数据
+categorical_features=['model','name', 'brand', 'notRepairedDamage','bodyType', 'fuelType', 'gearbox','regionCode']
+
+#查看类目型数据分布
+for i in categorical_features:
+    print (i)
+    print(data_all[i].value_counts().sort_index())
+#对'notRepairedDamage'数据进行转换
+data_all['notRepairedDamage'].replace('-', np.nan, inplace=True)
+#提取regionCode百位和千位数据
+data_all['regionCode']=(data_all.regionCode/100).astype(int)
+
+#查看缺失
+data_all[categorical_features].isnull().sum()
+
+#model有个一缺失，填充缺失
+data_all[data_all['model'].isnull()]['brand']
+data_all[data_all['brand']==37]['model'].value_counts()
+data_all['model']=data_all['model'].fillna(200)
+
+#缺失值比较多的共四个指标['notRepairedDamage','bodyType','fuelType','gearbox']
+
+#notRepairedDamage数据还不是数值型
+data_all['notRepairedDamage']=data_all['notRepairedDamage'].astype(float)
+
+#用机器学习去填充数据特征
+# 用Xgboost填充缺失值
+import xgboost as xgb
+def RFmodel(X_train,y_train,X_test):
+    model_xgb= xgb.XGBRegressor(max_depth=5, colsample_btree=0.1, learning_rate=0.1, n_estimators=32, min_child_weight=2)
+    model_xgb.fit(X_train,y_train)
+    y_pre=model_xgb.predict(X_test)
+    return y_pre
+
+#创建X_bodyType_train训练集，取有bodyType的数据
+X_bodyType=data_all.loc[(data_all['bodyType'].notnull()),:]#提取非缺失的数据
+X_bodyType=X_bodyType.drop(['bodyType','type','price','notRepairedDamage','gearbox','fuelType'],axis=1)
+y_bodyType_train=data_all.loc[data_all['bodyType'].notnull()==True,'bodyType']
+print(X_bodyType.shape)
+print(y_bodyType_train.shape)
+
+#创建X_bodyType_test测试集，取没有bodyType的数据
+X_bodyType_test=data_all.loc[data_all['bodyType'].isnull()==True,:]
+X_bodyType_test=X_bodyType_test.drop(['bodyType','type','price','notRepairedDamage','gearbox','fuelType'],axis=1)
+print(X_bodyType_test.shape)
+#填充 bodyType缺失
+y_pred=RFmodel(X_bodyType,y_bodyType_train,X_bodyType_test)
+data_all.loc[data_all['bodyType'].isnull(),'bodyType']=y_pred.astype(int)
+
+#notRepairedDamage
+#创建X_notRepairedDamage_train训练集，取有notRepairedDamage的数据
+X_notRepairedDamage=data_all.loc[(data_all['notRepairedDamage'].notnull()),:]#提取非缺失的数据
+X_notRepairedDamage=X_notRepairedDamage.drop(['type','price','notRepairedDamage','gearbox','fuelType'],axis=1)
+y_notRepairedDamage_train=data_all.loc[data_all['notRepairedDamage'].notnull()==True,'notRepairedDamage']
+print(X_notRepairedDamage.shape)
+print(y_notRepairedDamage_train.shape)
+
+#创建X_notRepairedDamage_test测试集，取没有notRepairedDamage的数据
+X_notRepairedDamage_test=data_all.loc[data_all['notRepairedDamage'].isnull()==True,:]
+X_notRepairedDamage_test=X_notRepairedDamage_test.drop(['type','price','notRepairedDamage','gearbox','fuelType'],axis=1)
+print(X_notRepairedDamage_test.shape)
+
+#填充 notRepairedDamage缺失
+y_pred=RFmodel(X_notRepairedDamage,y_notRepairedDamage_train,X_notRepairedDamage_test)
+data_all.loc[data_all['notRepairedDamage'].isnull(),'notRepairedDamage']=y_pred.astype(int)
+
+#fuelType
+#创建X_fuelType_train训练集，取有fuelType的数据
+X_fuelType=data_all.loc[(data_all['fuelType'].notnull()),:]#提取非缺失的数据
+X_fuelType=X_fuelType.drop(['type','price','gearbox','fuelType'],axis=1)
+y_fuelType_train=data_all.loc[data_all['fuelType'].notnull()==True,'fuelType']
+print(X_fuelType.shape)
+print(y_fuelType_train.shape)
+
+#创建X_fuelType_test测试集，取没有fuelType的数据
+X_fuelType_test=data_all.loc[data_all['fuelType'].isnull()==True,:]
+X_fuelType_test=X_fuelType_test.drop(['type','price','gearbox','fuelType'],axis=1)
+print(X_fuelType_test.shape)
+
+#填充 fuelType缺失
+y_pred=RFmodel(X_fuelType,y_fuelType_train,X_fuelType_test)
+data_all.loc[data_all['fuelType'].isnull(),'fuelType']=y_pred.astype(int)
+
+
+#gearbox
+#创建X_gearbox_train训练集，取有gearbox的数据
+X_gearbox=data_all.loc[(data_all['gearbox'].notnull()),:]#提取非缺失的数据
+X_gearbox=X_gearbox.drop(['type','price'],axis=1)
+y_gearbox_train=data_all.loc[data_all['gearbox'].notnull()==True,'gearbox']
+print(X_gearbox.shape)
+print(y_gearbox_train.shape)
+
+#创建X_gearbox_test测试集，取没有gearbox的数据
+X_gearbox_test=data_all.loc[data_all['gearbox'].isnull()==True,:]
+X_gearbox_test=X_gearbox_test.drop(['type','price'],axis=1)
+print(X_gearbox_test.shape)
+#填充 fuelType缺失
+y_pred=RFmodel(X_gearbox,y_gearbox_train,X_gearbox_test)
+data_all.loc[data_all['gearbox'].isnull(),'gearbox']=y_pred.astype(int)
+
+#创建used_time  时间特征
+print(data_all['regDate'].dtype)
+data_all['regDate']= pd.to_datetime(data_all['regDate'], format='%Y%m%d', errors='coerce')
+data_all['creatDate']=pd.to_datetime(data_all['creatDate'], format='%Y%m%d', errors='coerce')
+data_all['used_time']=(data_all['creatDate']-data_all['regDate']).dt.days
+data_all=data_all.drop(['creatDate','regDate'],axis=1)
+
+#创建X_used_time_train训练集，取有used_time的数据
+X_used_time=data_all.loc[(data_all['used_time'].notnull()),:]#提取非缺失的数据
+X_used_time=X_used_time.drop(['type','price'],axis=1)
+y_used_time_train=data_all.loc[data_all['used_time'].notnull()==True,'used_time']
+print(X_used_time.shape)
+print(y_used_time_train.shape)
+
+#创建X_used_time_test测试集，取没有used_time的数据
+X_used_time_test=data_all.loc[data_all['used_time'].isnull()==True,:]
+X_used_time_test=X_used_time_test.drop(['type','price'],axis=1)
+print(X_used_time_test.shape)
+
+
+#填充 used_time缺失
+y_pred=RFmodel(X_used_time,y_used_time_train,X_used_time_test)
+data_all.loc[data_all['used_time'].isnull(),'used_time']=y_pred.astype(int)
+
+data_all['year']=(data_all['used_time']/365).astype(int)
+
+#对异常数据进行缩放
+data_all['power']=data_all['power'].clip(0, 600)
+
+#对偏度数据进行log转换
+data_all.columns
+ske_features=['v_0', 'v_1', 'v_2', 'v_3', 'v_4', 'v_5', 'v_6',
+       'v_7', 'v_8', 'v_9', 'v_10', 'v_11', 'v_12', 'v_13', 'v_14','power', 'kilometer']
+
+data_all[ske_features].skew().abs().sort_values()>0.75
+data_all[ske_features].skew().abs().index
+data_all[['v_0','power','kilometer','v_7','v_5']]= np.log1p(data_all[['v_0','power','kilometer','v_7','v_5']])
+
+#对部分数据进行标准化
+from sklearn.preprocessing import MinMaxScaler,StandardScaler
+scaler = MinMaxScaler((0,1))
+data_all['used_time'] = scaler.fit_transform(data_all[['used_time']])
+
+# 创建新特征 类目数据和价格特征
+brand_and_price_mean=data_all.groupby('brand')['price'].mean()
+model_and_price_mean=data_all.groupby('model')['price'].mean()
+brand_and_price_median=data_all.groupby('brand')['price'].median()
+model_and_price_median=data_all.groupby('model')['price'].median()
+regioncode_and_price_mean=data_all.groupby('regionCode')['price'].mean()
+year_and_price_mean=data_all.groupby('year')['price'].mean()
+
+data_all['brand_and_price_mean']=data_all.loc[:,'brand'].map(brand_and_price_mean)
+data_all['model_and_price_mean']=data_all.loc[:,'model'].map(model_and_price_mean).fillna(model_and_price_mean.mean())
+data_all['brand_and_price_median']=data_all.loc[:,'brand'].map(brand_and_price_mean)
+data_all['model_and_price_median']=data_all.loc[:,'model'].map(model_and_price_mean).fillna(model_and_price_median.mean())
+data_all['regioncode_and_price_mean']=data_all.loc[:,'regionCode'].map(regioncode_and_price_mean)
+data_all['year_and_price_mean']=data_all.loc[:,'year'].map(year_and_price_mean)
+
+#离散性数据进行进行ONE-hot编码 'brand',
+onehot_features=['bodyType', 'fuelType', 'gearbox','brand','model','regionCode']
+
+for i in onehot_features:
+    data_all=data_all.join(pd.get_dummies(data_all[i]).add_prefix(i+"_"))
+    data_all=data_all.drop(i,axis=1)
+
+print(data_all.shape)
+
+#将相关系数处理加载到流水线中 
+#CustomCorrelationChooser 能够实现拟合逻辑和转换逻辑
+from sklearn.base import TransformerMixin,BaseEstimator
+class CustomCorrelationChooser(TransformerMixin,BaseEstimator):
+    def __init__(self,response,cols_to_keep=[],threshold=None):
+        self.response=response
+        #保存响应变量
+        self.threshold=threshold
+        #保存阈值
+        self.cols_to_keep=cols_to_keep 
+        #初始化变量，并保存特征名
+        
+    def transform(self,X):
+        return X[self.cols_to_keep] 
+    #转换会选择合适的列
+    
+    def fit(self,X,*_):
+        df=pd.concat([X,self.response],axis=1)
+        self.cols_to_keep=df.columns[df.corr()[df.columns[-1]].abs()>self.threshold]
+        self.cols_to_keep=[c for c in self.cols_to_keep if c in X.columns]
+        return self
+
+
+#模型
+X=data_all.loc[0:149999,:]
+X=X.drop(['price','type'],axis=1)
+Y=data_all.loc[0:149999,'price']
+
+#特征选择
+ccc = CustomCorrelationChooser(threshold=0.1,response=Y)
+ccc.fit(X)
+ccc.cols_to_keep
+ccc.transform(X).head()
+
+X= (ccc.transform(X))
+x_test=data_all.loc[150000:,:].drop(['price','type'],axis=1)[ccc.cols_to_keep]
+x_test.shape
+
+#数据标准化
+'''
+from sklearn.preprocessing import MinMaxScaler,StandardScaler
+scaler = MinMaxScaler()
+scaler2 = StandardScaler()
+X= scaler2.fit_transform(X)
+x_test=scaler2.fit_transform(x_test)
+'''
+
+x_train, x_valid, y_train, y_valid =train_test_split(X,Y,train_size=0.8,random_state=10)
+
+print(",训练数据特征:",x_train.shape,
+      ",测试数据特征:",x_valid.shape,
+      ",测试数据特征:",x_test.shape)
+print(",训练数据标签:",y_train.shape,
+     ',测试数据标签:',y_valid.shape)
+
+
+
+
+#模型一（lightgbm)
+import lightgbm as lgb
+lgb_train = lgb.Dataset(x_train,label=y_train)
+lgb_valid = lgb.Dataset(x_valid,label=y_valid, reference=lgb_train)
+num_round = 150000
+params = {'boosting_type': 'gbdt',
+         'num_leaves': 31,
+         'max_depth': -1,
+         "lambda_l2": 2,  # 防止过拟合
+         'min_data_in_leaf': 20,  # 防止过拟合，好像都不用怎么调
+         'objective': 'regression_l1',
+         'learning_rate': 0.01,
+         "min_child_samples": 20,
+         "feature_fraction": 0.8,
+         "bagging_freq": 1,
+         "bagging_fraction": 0.8,
+         "bagging_seed": 11,
+         "metric": 'mae',
+         }
+
+results = {}
+
+gbm = lgb.train(params,
+                lgb_train, 
+                num_boost_round= num_round, 
+                valid_sets=[lgb_valid,lgb_train],
+                valid_names=('validate','train'),
+                early_stopping_rounds = 500,
+                evals_result= results,
+                )
+#预测结果
+
+
+#测试集
+predictions_gbm=gbm.predict(x_test)
+print(pd.DataFrame(predictions_gbm).describe())
+
+sub = pd.DataFrame()
+sub['SaleID'] = data_test.SaleID
+sub['price']=predictions_gbm
+sub['price']=sub['price'].apply(lambda x:abs(x))
+sub.to_csv('us_car_predictions_lgbm.csv', index=False)
+
+#模型二（catboost)
+#catboost
+from catboost import CatBoostRegressor, Pool
+cb_params = {
+        'n_estimators': 160000,
+        'loss_function': 'MAE',
+        'eval_metric': 'MAE',
+        'learning_rate': 0.01,
+        'depth': 6,
+        'use_best_model': True,
+        'subsample': 0.6,
+        'bootstrap_type': 'Bernoulli',
+        'reg_lambda': 3,
+        'one_hot_max_size': 2,
+    }
+model_cb = CatBoostRegressor(**cb_params)
+
+model_cb.fit(x_train, y_train, eval_set=[(x_valid, y_valid)], verbose=10, early_stopping_rounds=2000)
+ 
+#预测结果
+predictions_cb=model_cb.predict(x_test, ntree_end=model_cb.best_iteration_)
+print(pd.DataFrame(predictions_cb).describe())
+sub2 = pd.DataFrame()
+sub2['SaleID'] = data_test.SaleID
+sub2['price']=predictions_cb
+sub2['price']=sub['price'].apply(lambda x:abs(x))
+sub2.to_csv('us_car_predictions_cb.csv', index=False)
+
+#数据合成
+sub3 = pd.DataFrame()
+sub3['SaleID'] = data_test.SaleID
+sub3['price']=sub2['price']*0.7+sub['price']*0.3
+sub3.to_csv('us_car_prediction.csv', index=False)
